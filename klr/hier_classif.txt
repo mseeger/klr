@@ -1,0 +1,145 @@
+HIERARCHICAL CLASSIFICATION
+---------------------------
+
+Describes how hierarchical classification is done within the kernel
+multiple logistic regression framework.
+
+Hierarchical classification is done by specifying a non-independent
+prior for the latent class functions, leading to a kernel matrix K which
+is not block-diagonal. In order to embed this into the generic code,
+special implementations of the primitives COVMUL, COVPARTMUL, COVTESTMUL,
+and ACCUM_GRAD are implemented.
+
+The variables for the hierarchical extension are kept in KLR.HIERARCH.
+The extension is used iff KLR.HIERARCH.USE==1.
+The label hierarchy is a tree with P nodes (except the root), the C leaf
+nodes are the classes. Nodes are numbered 0,...,P, with 0 the root.
+Node j has children CS(j)+1,...,CS(j)+CN(j) if CN(j)>0. The numbering is
+contiguous. The index L picks out the leaf nodes from 1,...,P.
+- KLR.HIERARCH.NUMP: Number of nodes P (except root)
+- KLR.HIERARCH.CHILDN: CN(.) vector, size P+1
+- KLR.HIERARCH.LEAFS: Index L, size C
+- KLR.HIERARCH.PARENT: Vector, size P. Contains parent node for each j
+  (root is 0)
+
+There are P independent latent functions with kernels K^(j), one for each
+node (except root). Sharing is supported via K^(j) = v_j M^(l_j) + s_j,
+v_j, s_j>0. The offset parameters s_j are optional.
+NOTE: The K^(j) kernels are called \tilde{K} to distinguish them from the
+true joint kernels.
+- KLR_INTERN.COVMAT: Tilde kernel matrices block of size N-by-(N*?). Contains
+  successive M^(l) matrices, M^(1), M^(3) in lower triangles, M^(2), M^(4)
+  in upper triangles. See MBUFF arg. of KLR_COMPKERNMATVECT.
+  The kernel matrix diagonals are not maintained here.
+  NOTE: KLR.COVINFO.TIED is ignored.
+- KLR_INTERN.COVTLDIAG: Matrix N-by-?, containing the diagonals of the
+  kernel matrices in KLR_INTERN.COVMAT.
+  NOTE: KLR.COVDIAG contains the diagonal of the true kernel matrix K,
+  as before.
+- KLR.COVINFO.VPAR_POS: Index vector, size P. Contains positions of
+  log of tilde kernel parameters log(v_p) in KLR.COVINFO.THETA.
+  NOTE: Repeated entries in index are allowed, meaning that v_p parameters
+  are shared in KLR.COVINFO.THETA.
+- KLR.COVINFO.SPAR_POS: Index vector, size P. Contains positions of
+  log of tilde kernel parameters log(s_p) in KLR.COVINFO.THETA.
+  If the s_p are not to be used (equal to 0), SPAR_POS must be empty.
+  NOTE: Repeated entries in index are allowed, meaning that s_p parameters
+  are shared in KLR.COVINFO.THETA.
+  Need not be given if KLR.HIERARCH.USE_SPARS is false.
+- KLR.HIERARCH.L2P: Codes mapping (l_p). Int vector containing chunks
+  num,p_1,...,p_num for subseq. values l, s.t. p_1,...,p_num are the nodes
+  with l_{p_i} = l. See L2P arg. of KLR_COMPKERNMATVECT.
+  NOTE: Requires that p_1 < p_2 < ... < p_num.
+- KLR.HIERARCH.P2L: Codes mapping (l_p). Int vector, size P.
+- KLR.HIERARCH.MPAR_NUM: Int vector. Contains number of param. of M^(l)
+  for all l. The v_p are separate. MPAR_POS int vector, cont. first pos.
+  of M^(l) pars. within KLR.COVINFO.THETA, for all l. Entry not used if
+  corr. M^(l) has no pars. (MPAR_NUM field ==0).
+- KLR.HIERARCH.MPAR_POS: See MPAR_NUM.
+- KLR_INTERN.COVMUL_TMPBUFF: Temp. buffer used by KLR_COMPKERNMATVECT and
+  KLR_COMPKERNMATMAT functions. See TMPBUFF arg. there.
+  If this buffer is not large enough, a buffer is temp. alloc. within these
+  methods. To save time, make this buffer large enough for at least
+  KLR_COMPKERNMATVECT: Size 2*N*MAXNUM, where MAXNUM is maximal 'num' entry
+  in KLR.HIERARCH.L2P.
+
+The ACCUM_GRAD primitive is implemented generically, making use of an
+internal primitive:
+- DERIVMMULMAT (handle in KLR.HIERARCH.DERIVMMULMAT):
+  Y = DERIVMMULMAT(X,L,PPOS)
+  Returns Y = DV*X, where DV is the derivative of M^(l), l==L, w.r.t.
+  the PPOS-th parameter of this kernel. X is  a matrix. The v_p parameters
+  do not count as parameters of the M kernels. The implementation needs to
+  know the pos. of the param. within KLR.COVINFO.THETA.
+  Requires KLR.COVINFO.PREC_OK==1.
+  NOTE: If the kernel does not have parameters (other than the v_p),
+  this primitive need not be given.
+
+The COVTESTMUL primitive is implemented generically, making use of an
+internal primitive:
+- COVMMULMAT (handle in KLR.HIERARCH.COVMMULMAT):
+  Y = COVMMULMAT(X,L,TEDATA,{IND})
+  Returns Y = M*X, where M is the M^(l) matrix between test points in
+  TEDATA and training points. Pars. of M^(l) have to be read from
+  KLR.COVINFO.THETA. X, Y are matrices.
+  If IND is given, it is an index in 1:N, and M is the M^(l) matrix between
+  TEDATA and the subset of training points corr. to IND. X must be smaller
+  accordingly.
+
+Support of low rank kernel matrix approximation:
+
+The matrix M^(l) is replaced by the approximation P^(l) V^(l) (V^(l))^T
+(P^(l))^T, where V^(l) = (P^(l))^T M^(l)_{*,I_l} (L^(l))^{-T}, L^(l) the
+Cholesky factor of M^(l)_{I_l}. I_l is an active set index of size d_l.
+P^(l) is a permutation matrix. Since the permutation maps 1,...,d_l to
+I_l, we have that L^(l) = [V^(l)]_{1..d_l,*}.
+In fact, we correct the approximation by replacing its diagonal by the true
+diagonal of M^(l).
+Related variables are defined in KLR.HIERARCH.LOWRK, and the low rank feature
+is used iff this structure exists and KLR.HIERARCH.LOWRK.USE==1:
+- KLR_INTERN.COVMAT: N-by-? matrix, containing the matrices V^(l) from
+  left to right.
+  NOTE: KLR_INTERN.COVTLDIAG contains the true diagonals of the M^(l)
+  matrices, as before.
+- KLR.HIERARCH.LOWRK.PERM: Matrix N-by-?, encoding the P^(l) permutations. If
+  A is the l-th column, P^(l) maps coord. i to pos. A(i). The active set I_l
+  is given by A(1),...,A(d_l)
+- KLR.HIERARCH.LOWRK.ACTSZ: Int vector, containing active set sizes d_l
+- KLR.HIERARCH.LOWRK.CMAT_POS: Vector, contains number of 1st col. of
+  V^(l) in KLR_INTERN.COVMAT.
+  NOTE: Can also be inferred from ACTSZ.
+- KLR.HIERARCH.LOWRK.CMAT_DIAG: Matrix N-by-?, containing the diagonals of
+  P^(l) V^(l) (V^(l))^T (P^(l))^T for all l.
+
+The ACCUM_GRAD primitive is implemented generically, making use of the
+following primitives:
+- DERIVMTRACE (handle in KLR.HIERARCH.LOWRK.DERIVMTRACE):
+  TR = DERIVMTRACE(X,L,PPOS,IIND)
+  Returns trace of X'*DV, where DV is the derivative of M^(l)_{.,I} for
+  l==L and active index I==IIND, w.r.t. the PPOS-th parameter of this
+  kernel. The v_p parameters do not count as parameters of the M kernels.
+  Requires KLR.COVINFO.PREC_OK==1.
+- DERIVDGMINNER (handle in KLR.HIERARCH.LOWRK.DERIVDGMINNER):
+  TR = DERIVDGMINNER(XVEC,L,PPOS)
+  Returns XVEC'*DV, where DV is the derivative of diag M^(l) for l==L,
+  w.r.t. the PPOS-th parameter of this kernel.
+
+Support for the linear kernel:
+
+The linear kernel is used iff KLR.HIERARCH.LINEAR_KERN is defined and
+==1.
+In this case, there is only a single M^(1) being the linear kernel
+x^T y. KLR_INTERN.COVMAT is not used then, but the training data matrix
+(can be sparse) has to be given in KLR_INTERN.XDATA.
+KLR_INTERN.COVTLDIAG still contains the diagonal of M^(1). M^(1) has
+no parameters, so KLR.HIERARCH.MPAR_NUM = 0.
+The KLR.HIERARCH.COVMMULMAT primitive is not required.
+
+
+TODO:
+- Normal:
+  - DERIVMMULMAT primitive for kernels to be used (not linear)
+    ==> req. for ACCUM_GRAD (only for learning)
+- Low rank:
+  - DERIVMTRACE, DERIVDGMINNER primitives for kernels to be used
+    (not linear)
